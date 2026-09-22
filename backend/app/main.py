@@ -146,7 +146,7 @@ def owned(collection: str, item_id: str, user_id: str) -> dict[str, Any]:
 
 @app.get("/api/health")
 def health() -> dict[str, Any]:
-    return {"status": "ok", "mode": "demo" if os.getenv("DEMO_MODE", "false").lower() == "true" else "production", "database": "mongodb" if store.available else "memory-fallback"}
+    return {"status": "ok", "mode": "demo" if os.getenv("DEMO_MODE", "false").lower() == "true" else "production", "database": "dynamodb" if store.available else "dynamodb-unavailable", "s3": bool(os.getenv("S3_BUCKET_NAME", "").strip())}
 
 @app.post("/api/auth/register")
 def register(request: RegisterRequest) -> dict[str, Any]:
@@ -184,7 +184,13 @@ async def analyze(resume: UploadFile = File(...), job_description: str = Form(..
     if not resume_text:
         raise HTTPException(status_code=400, detail="The uploaded resume is empty.")
     user_id = str(user["_id"])
-    resume_id = store.insert("resumes", {"user_id": user_id, "file_name": resume.filename, "file_type": resume.content_type, "raw_text": resume_text})
+    resume_key = f"{user_id}/resumes/{uuid.uuid4()}-{resume.filename}"
+    resume_url = None
+    try:
+        resume_url = store.upload_file(io.BytesIO(content), resume_key, resume.content_type)
+    except Exception as error:
+        raise HTTPException(status_code=502, detail="Resume storage is unavailable. Please try again.") from error
+    resume_id = store.insert("resumes", {"user_id": user_id, "file_name": resume.filename, "file_type": resume.content_type, "raw_text": resume_text, "s3_key": resume_key if resume_url else None, "s3_url": resume_url})
     job_id = store.insert("job_descriptions", {"user_id": user_id, "raw_text": job_description, "job_title": job_description.splitlines()[0].strip()})
     result = build_analysis(resume_text, job_description, user_id, resume_id, job_id)
     store.insert("resume_analyses", result)
@@ -195,8 +201,14 @@ async def analyze(resume: UploadFile = File(...), job_description: str = Form(..
 async def upload_resume(resume: UploadFile = File(...), user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
     content = await resume.read()
     text = extract_text(resume.filename or "resume", content)
-    resume_id = store.insert("resumes", {"user_id": str(user["_id"]), "file_name": resume.filename, "file_type": resume.content_type, "raw_text": text})
-    return {"resume_id": resume_id, "file_name": resume.filename, "extracted_text": text}
+    user_id = str(user["_id"])
+    resume_key = f"{user_id}/resumes/{uuid.uuid4()}-{resume.filename}"
+    try:
+        resume_url = store.upload_file(io.BytesIO(content), resume_key, resume.content_type)
+    except Exception as error:
+        raise HTTPException(status_code=502, detail="Resume storage is unavailable. Please try again.") from error
+    resume_id = store.insert("resumes", {"user_id": user_id, "file_name": resume.filename, "file_type": resume.content_type, "raw_text": text, "s3_key": resume_key if resume_url else None, "s3_url": resume_url})
+    return {"resume_id": resume_id, "file_name": resume.filename, "extracted_text": text, "s3_url": resume_url}
 
 @app.get("/api/resumes")
 def resumes(user: dict[str, Any] = Depends(current_user)) -> list[dict[str, Any]]:

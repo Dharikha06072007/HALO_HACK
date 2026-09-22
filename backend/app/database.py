@@ -3,92 +3,171 @@ from __future__ import annotations
 import os
 import uuid
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, BinaryIO
 
 try:
-    from pymongo import ASCENDING, MongoClient
-    from pymongo.errors import DuplicateKeyError, PyMongoError
+    import boto3
+    from botocore.exceptions import BotoCoreError, ClientError
 except ImportError:  # pragma: no cover
-    ASCENDING = None
-    MongoClient = None
-    DuplicateKeyError = Exception
-    PyMongoError = Exception
+    boto3 = None
+    BotoCoreError = ClientError = Exception
+
+TABLES = {
+    "users": "skillsync-users",
+    "resumes": "skillsync-resumes",
+    "job_descriptions": "skillsync-jobs",
+    "resume_analyses": "skillsync-analyses",
+    "learning_paths": "skillsync-learning-paths",
+    "interview_sessions": "skillsync-interview-sessions",
+    "interview_questions": "skillsync-interview-questions",
+    "interview_answers": "skillsync-interview-answers",
+    "interview_feedback": "skillsync-interview-feedback",
+}
 
 
-def utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
-class Store:
+def serialize(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(key): serialize(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [serialize(item) for item in value]
+    return value
+
+
+class DuplicateKeyError(Exception):
+    pass
+
+
+class DynamoStore:
     def __init__(self) -> None:
+        self.resource = None
         self.client = None
-        self.db = None
+        self.tables: dict[str, Any] = {}
         self.memory: dict[str, dict[str, dict[str, Any]]] = {}
         self.available = False
-        uri = os.getenv("MONGODB_URI", "").strip()
-        if uri and MongoClient:
-            try:
-                self.client = MongoClient(uri, serverSelectionTimeoutMS=800)
-                self.client.admin.command("ping")
-                self.db = self.client[os.getenv("MONGODB_DB_NAME", "skillsync_ai")]
-                self._indexes()
-                self.available = True
-            except PyMongoError:
-                self.close()
-
-    def _indexes(self) -> None:
-        if self.db is None:
+        if not boto3:
             return
-        self.db.users.create_index("email", unique=True)
-        self.db.interview_answers.create_index("answer_submission_id", unique=True)
-        for collection in ("resumes", "job_descriptions", "resume_analyses", "learning_paths", "interview_sessions", "interview_questions", "interview_answers", "interview_feedback"):
-            self.db[collection].create_index([("user_id", ASCENDING), ("created_at", ASCENDING)])
+        try:
+            kwargs = {"region_name": os.getenv("AWS_REGION", "us-east-1")}
+            endpoint = os.getenv("DYNAMODB_ENDPOINT_URL", "").strip()
+            if endpoint:
+                kwargs["endpoint_url"] = endpoint
+            self.resource = boto3.resource("dynamodb", **kwargs)
+            self.client = boto3.client("dynamodb", **kwargs)
+            if os.getenv("DYNAMODB_CREATE_TABLES", "false").lower() == "true":
+                self._ensure_tables()
+            self.available = all(self._table_exists(name) for name in TABLES.values())
+            if self.available:
+                self.tables = {name: self.resource.Table(table_name) for name, table_name in TABLES.items()}
+        except (BotoCoreError, ClientError):
+            self.close()
+
+    def _table_exists(self, table_name: str) -> bool:
+        try:
+            self.client.describe_table(TableName=table_name)
+            return True
+        except (BotoCoreError, ClientError):
+            return False
+
+    def _ensure_tables(self) -> None:
+        for table_name in TABLES.values():
+            if self._table_exists(table_name):
+                continue
+            self.client.create_table(TableName=table_name, KeySchema=[{"AttributeName": "id", "KeyType": "HASH"}], AttributeDefinitions=[{"AttributeName": "id", "AttributeType": "S"}], BillingMode="PAY_PER_REQUEST")
 
     def close(self) -> None:
-        if self.client:
-            self.client.close()
+        self.resource = None
         self.client = None
-        self.db = None
+        self.tables = {}
         self.available = False
 
     def insert(self, collection: str, document: dict[str, Any]) -> str:
-        document = {**document}
-        document.setdefault("_id", str(uuid.uuid4()))
-        document.setdefault("created_at", utc_now())
-        if self.available and self.db is not None:
+        item = serialize({**document})
+        item.setdefault("id", item.get("_id", str(uuid.uuid4())))
+        item.setdefault("_id", item["id"])
+        item.setdefault("created_at", utc_now())
+        if self.available:
             try:
-                result = self.db[collection].insert_one(document)
-                return str(result.inserted_id)
-            except DuplicateKeyError:
+                self.tables[collection].put_item(Item=item, ConditionExpression="attribute_not_exists(id)")
+                return str(item["id"])
+            except ClientError as error:
+                if error.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                    raise DuplicateKeyError from error
                 raise
-        self.memory.setdefault(collection, {})[str(document["_id"])] = document
-        return str(document["_id"])
+        self.memory.setdefault(collection, {})[str(item["id"])] = item
+        return str(item["id"])
 
     def find_one(self, collection: str, query: dict[str, Any]) -> dict[str, Any] | None:
-        if self.available and self.db is not None:
-            result = self.db[collection].find_one(query)
-            if result and "_id" in result:
-                result["_id"] = str(result["_id"])
-            return result
-        for document in self.memory.get(collection, {}).values():
-            if all(document.get(key) == value for key, value in query.items()):
-                return dict(document)
+        normalized = {"id" if key in {"_id", "id"} else key: value for key, value in query.items()}
+        if self.available:
+            table = self.tables[collection]
+            item = None
+            if "id" in normalized:
+                item = table.get_item(Key={"id": str(normalized["id"])}).get("Item")
+            else:
+                items = self.find_many(collection, normalized)
+                item = items[0] if items else None
+            if item and all(item.get(key) == value for key, value in normalized.items()):
+                return item
+            return None
+        for item in self.memory.get(collection, {}).values():
+            if all(item.get(key) == value for key, value in normalized.items()):
+                return dict(item)
         return None
 
     def find_many(self, collection: str, query: dict[str, Any]) -> list[dict[str, Any]]:
-        if self.available and self.db is not None:
-            cursor = self.db[collection].find(query).sort("created_at", -1)
-            return [{**item, "_id": str(item["_id"])} for item in cursor]
-        return [dict(item) for item in self.memory.get(collection, {}).values() if all(item.get(key) == value for key, value in query.items())]
+        normalized = {"id" if key in {"_id", "id"} else key: value for key, value in query.items()}
+        if self.available:
+            scan_kwargs: dict[str, Any] = {}
+            if normalized:
+                from boto3.dynamodb.conditions import Attr
+                expression = None
+                for key, value in normalized.items():
+                    condition = Attr(key).eq(value)
+                    expression = condition if expression is None else expression & condition
+                scan_kwargs["FilterExpression"] = expression
+            items: list[dict[str, Any]] = []
+            while True:
+                response = self.tables[collection].scan(**scan_kwargs)
+                items.extend(response.get("Items", []))
+                if "LastEvaluatedKey" not in response:
+                    break
+                scan_kwargs["ExclusiveStartKey"] = response["LastEvaluatedKey"]
+            return sorted(items, key=lambda item: str(item.get("created_at", "")), reverse=True)
+        return [dict(item) for item in self.memory.get(collection, {}).values() if all(item.get(key) == value for key, value in normalized.items())]
 
     def update(self, collection: str, query: dict[str, Any], values: dict[str, Any]) -> None:
-        if self.available and self.db is not None:
-            self.db[collection].update_one(query, {"$set": values})
+        item = self.find_one(collection, query)
+        if not item:
             return
-        document = self.find_one(collection, query)
-        if document:
-            document.update(values)
-            self.memory[collection][str(document["_id"])] = document
+        if self.available:
+            from boto3.dynamodb.conditions import Attr
+            update_parts = []
+            names: dict[str, str] = {}
+            attributes: dict[str, Any] = {}
+            for index, (key, value) in enumerate(serialize(values).items()):
+                alias = f"#field{index}"
+                token = f":value{index}"
+                names[alias] = key
+                attributes[token] = value
+                update_parts.append(f"{alias} = {token}")
+            self.tables[collection].update_item(Key={"id": item["id"]}, UpdateExpression="SET " + ", ".join(update_parts), ExpressionAttributeNames=names, ExpressionAttributeValues=attributes)
+            return
+        item.update(serialize(values))
+        self.memory[collection][str(item["id"])] = item
+
+    def upload_file(self, file_obj: BinaryIO, key: str, content_type: str | None = None) -> str | None:
+        bucket = os.getenv("S3_BUCKET_NAME", "").strip()
+        if not bucket or not self.resource:
+            return None
+        extra = {"ContentType": content_type} if content_type else {}
+        self.resource.meta.client.upload_fileobj(file_obj, bucket, key, ExtraArgs=extra)
+        return f"s3://{bucket}/{key}"
 
 
-store = Store()
+store = DynamoStore()
