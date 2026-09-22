@@ -6,6 +6,10 @@ import urllib.error
 import urllib.request
 from typing import Any
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 
 def generate_json(prompt: str, fallback: dict[str, Any]) -> dict[str, Any]:
     key = os.getenv("GEMINI_API_KEY", "").strip()
