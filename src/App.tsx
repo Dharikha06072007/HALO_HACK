@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { ArrowUpRight, BarChart3, BrainCircuit, Check, ChevronRight, CircleHelp, FileText, Headphones, LayoutDashboard, Mic, MoreHorizontal, Play, Plus, Sparkles, Target, Upload, Video, X } from 'lucide-react'
+import { ArrowUpRight, BarChart3, Check, ChevronRight, CircleHelp, FileText, Headphones, LayoutDashboard, Mic, MoreHorizontal, Play, Sparkles, Target, Upload, Video, X } from 'lucide-react'
 import { Analysis, analyzeResume, demoAnalysis } from './api'
 import InterviewRoom from './InterviewRoom'
 
