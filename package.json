@@ -11,6 +11,7 @@
   "dependencies": {
     "@vitejs/plugin-react": "latest",
     "lucide-react": "latest",
+    "recharts": "latest",
     "react": "latest",
     "react-dom": "latest",
     "typescript": "latest",
