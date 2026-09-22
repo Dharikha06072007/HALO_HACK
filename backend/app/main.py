@@ -33,6 +33,7 @@ app.add_middleware(
 DEMO_RESUME = """Maya Chen\nPython FastAPI MongoDB JWT React\nEduTwin: built a FastAPI backend, REST APIs, MongoDB data layer, and JWT authentication.\n"""
 DEMO_JD = """Backend Developer\nPython FastAPI REST APIs PostgreSQL Docker AWS\nBuild secure services, improve reliability, and collaborate with product teams."""
 SESSIONS: dict[str, dict[str, Any]] = {}
+ANALYSES: dict[str, dict[str, Any]] = {}
 
 class AnswerRequest(BaseModel):
     answer_submission_id: str = Field(min_length=1)
@@ -117,14 +118,48 @@ async def analyze(resume: UploadFile | None = File(default=None), job_descriptio
             raise HTTPException(status_code=400, detail="The uploaded resume appears to be empty.")
     if not job_description.strip():
         raise HTTPException(status_code=400, detail="Add a job description before analyzing.")
-    return build_analysis(resume_text, job_description)
+    result = build_analysis(resume_text, job_description)
+    ANALYSES[result["id"]] = result
+    return result
+
+@app.post("/api/resume/upload")
+async def upload_resume(resume: UploadFile = File(...)) -> dict[str, Any]:
+    content = await resume.read()
+    if len(content) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Resume must be smaller than 10 MB.")
+    text = extract_text(resume.filename or "resume.txt", content)
+    if not text:
+        raise HTTPException(status_code=400, detail="The uploaded resume appears to be empty.")
+    return {"resume_id": str(uuid.uuid4()), "filename": resume.filename, "extracted_text": text}
+
+@app.post("/api/job/analyze")
+def analyze_job(job_description: str = Form(default="")) -> dict[str, Any]:
+    if not job_description.strip():
+        raise HTTPException(status_code=400, detail="Add a job description before analyzing.")
+    lines = [line.strip() for line in job_description.splitlines() if line.strip()]
+    return {"job_title": lines[0] if lines else "Target role", "required_skills": [skill for skill in ("Python", "FastAPI", "REST APIs", "PostgreSQL", "Docker", "AWS") if has(job_description, skill)], "responsibilities": lines[1:]}
+
+@app.get("/api/analysis/{analysis_id}")
+def get_analysis(analysis_id: str) -> dict[str, Any]:
+    analysis = ANALYSES.get(analysis_id)
+    if not analysis:
+        raise HTTPException(status_code=404, detail="Analysis not found.")
+    return analysis
+
+@app.get("/api/analysis/{analysis_id}/learning-path")
+def get_learning_path(analysis_id: str) -> list[dict[str, Any]]:
+    analysis = ANALYSES.get(analysis_id)
+    if not analysis:
+        raise HTTPException(status_code=404, detail="Analysis not found.")
+    return analysis["roadmap"]
 
 @app.post("/api/interview/start")
 def start_interview(request: StartRequest) -> dict[str, Any]:
     session_id = str(uuid.uuid4())
-    session = {"session_id": session_id, "analysis_id": request.analysis_id, "status": "active", "current_question_index": 0, "total_questions": 5, "completed_answer_ids": [], "answers": {}, "started_at": now(), "elapsed_seconds": 0}
+    analysis = ANALYSES.get(request.analysis_id) or build_analysis(DEMO_RESUME, DEMO_JD)
+    session = {"session_id": session_id, "analysis_id": request.analysis_id, "status": "active", "current_question_index": 0, "total_questions": len(analysis["questions"]), "questions": analysis["questions"], "role": analysis["role"], "completed_answer_ids": [], "answers": {}, "started_at": now(), "elapsed_seconds": 0}
     SESSIONS[session_id] = session
-    return {**session, "question": build_analysis(DEMO_RESUME, DEMO_JD)["questions"][0]}
+    return {**session, "question": session["questions"][0]}
 
 @app.post("/api/interview/{session_id}/answer")
 def submit_answer(session_id: str, request: AnswerRequest) -> dict[str, Any]:
@@ -138,14 +173,15 @@ def submit_answer(session_id: str, request: AnswerRequest) -> dict[str, Any]:
     session["answers"][request.answer_submission_id] = result
     session["completed_answer_ids"].append(request.answer_submission_id)
     session["current_question_index"] = min(question_index + 1, session["total_questions"])
-    return {"duplicate": False, **result, "next_action": "ASK_FOLLOW_UP" if question_index == 0 else "NEXT_TOPIC"}
+    follow_up = question_index == 0 and any(term.lower() in request.transcript.lower() for term in ("jwt", "token", "authentication"))
+    return {"duplicate": False, **result, "next_action": "ASK_FOLLOW_UP" if follow_up else "NEXT_TOPIC"}
 
 @app.get("/api/interview/{session_id}/state")
 def interview_state(session_id: str) -> dict[str, Any]:
     session = SESSIONS.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Interview session not found.")
-    questions = build_analysis(DEMO_RESUME, DEMO_JD)["questions"]
+    questions = session["questions"]
     return {**session, "question": questions[min(session["current_question_index"], len(questions) - 1)] if session["current_question_index"] < len(questions) else None}
 
 @app.post("/api/interview/{session_id}/end")

@@ -20,6 +20,23 @@ export type Analysis = {
   questions: string[]
 }
 
+export type InterviewState = {
+  session_id: string
+  status: string
+  current_question_index: number
+  total_questions: number
+  completed_answer_ids: string[]
+  question: string | null
+}
+
+export type AnswerResult = {
+  duplicate: boolean
+  answer_submission_id: string
+  next_action: 'ASK_FOLLOW_UP' | 'NEXT_TOPIC'
+  question_index: number
+  transcript: string
+}
+
 export const demoAnalysis: Analysis = {
   id: 'demo-analysis',
   role: 'Backend Developer',
@@ -71,4 +88,36 @@ export async function analyzeResume(file: File | null, jobDescription: string): 
   const response = await fetch(`${base}/api/analyze`, { method: 'POST', body: form })
   if (!response.ok) throw new Error('The analysis service could not process this request.')
   return response.json()
+}
+
+const apiBase = () => import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000'
+
+export async function startInterview(analysisId: string): Promise<InterviewState & { question: string }> {
+  const response = await fetch(`${apiBase()}/api/interview/start`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ analysis_id: analysisId }),
+  })
+  if (!response.ok) throw new Error('The interview session could not be started.')
+  return response.json()
+}
+
+export async function getInterviewState(sessionId: string): Promise<InterviewState> {
+  const response = await fetch(`${apiBase()}/api/interview/${sessionId}/state`)
+  if (!response.ok) throw new Error('The interview session could not be recovered.')
+  return response.json()
+}
+
+export async function submitInterviewAnswer(sessionId: string, answerSubmissionId: string, transcript: string): Promise<AnswerResult> {
+  const response = await fetch(`${apiBase()}/api/interview/${sessionId}/answer`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ answer_submission_id: answerSubmissionId, transcript }),
+  })
+  if (!response.ok) throw new Error('Your answer could not be saved. It is still safe to retry.')
+  return response.json()
+}
+
+export async function endInterview(sessionId: string): Promise<void> {
+  await fetch(`${apiBase()}/api/interview/${sessionId}/end`, { method: 'POST' })
 }

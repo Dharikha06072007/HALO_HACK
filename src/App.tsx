@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { ArrowUpRight, BarChart3, BrainCircuit, Check, ChevronRight, CircleHelp, FileText, Headphones, LayoutDashboard, Mic, MoreHorizontal, Play, Plus, Sparkles, Target, Upload, Video, X } from 'lucide-react'
 import { Analysis, analyzeResume, demoAnalysis } from './api'
+import InterviewRoom from './InterviewRoom'
 
 type View = 'overview' | 'analyze' | 'skills' | 'interview' | 'roadmap'
 
@@ -49,7 +50,7 @@ function App() {
         {view === 'analyze' && <Analyze file={file} setFile={setFile} jobDescription={jobDescription} setJobDescription={setJobDescription} runAnalysis={runAnalysis} isAnalyzing={isAnalyzing} error={error} />}
         {view === 'skills' && <Skills analysis={current} />}
         {view === 'roadmap' && <Roadmap analysis={current} />}
-        {view === 'interview' && <Interview analysis={current} />}
+        {view === 'interview' && <InterviewRoom analysis={current} />}
       </main>
     </div>
   )
